@@ -2,7 +2,7 @@ import os
 import re
 import json
 import time
-from datetime import datetime, date
+from datetime import datetime
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
@@ -21,7 +21,6 @@ DEBUG = os.environ.get("DEBUG", "0").strip().lower() in {"1", "true", "yes", "on
 
 HEIMAT_EMBED_URL = os.environ.get("HEIMAT_EMBED_URL", "").strip()
 if not HEIMAT_EMBED_URL:
-    # Standard Witzenhausen Embed (c Parameter)
     HEIMAT_EMBED_URL = "https://www.heimat-info.de/embeddings/events/v1/?c=a8169a1a-b21f-4922-98de-1bce6480c8f6"
 
 HEADERS = {
@@ -54,7 +53,7 @@ def telegram_send_message(text_html: str) -> None:
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text_html,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False,
+        "disable_web_page_preview": True,
     }
     r = requests.post(api, json=payload, timeout=30)
     if DEBUG:
@@ -71,7 +70,6 @@ def extract_event_detail_urls_from_embed(embed_html: str, embed_url: str) -> set
     soup = BeautifulSoup(embed_html, "html.parser")
     urls: set[str] = set()
 
-    # Primär: echte Links
     for a in soup.find_all("a", href=True):
         href = (a.get("href") or "").strip()
         if not href:
@@ -80,7 +78,7 @@ def extract_event_detail_urls_from_embed(embed_html: str, embed_url: str) -> set
         if abs_url.startswith("https://www.heimat-info.de/veranstaltungen/"):
             urls.add(abs_url.rstrip("/"))
 
-    # Fallback: Links stehen manchmal nicht als <a> drin, sondern im HTML
+    # Fallback: Links per Regex
     uuid_re = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     for m in re.finditer(rf"https://www\.heimat-info\.de/veranstaltungen/{uuid_re}", embed_html):
         urls.add(m.group(0).rstrip("/"))
@@ -88,6 +86,36 @@ def extract_event_detail_urls_from_embed(embed_html: str, embed_url: str) -> set
         urls.add(("https://www.heimat-info.de" + m.group(0)).rstrip("/"))
 
     return urls
+
+
+def looks_like_location(line: str) -> bool:
+    s = (line or "").strip()
+    if len(s) < 4:
+        return False
+
+    low = s.lower()
+
+    # UI Wörter
+    if low in {"details", "zurück"}:
+        return False
+
+    # keine reinen Datums oder Uhrzeitzeilen
+    if re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", s):
+        return False
+    if re.search(r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}", s):
+        return False
+    if re.search(r"\b\d{1,2}:\d{2}\b", s) and "uhr" in low:
+        return False
+
+    # positive Signale für Ort
+    if re.search(r"\b\d{5}\b", s):
+        return True
+    if any(k in low for k in ["straße", "str.", "platz", "weg", "gasse", "markt", "allee", "ring", "hof", "damm"]):
+        return True
+    if "," in s:
+        return True
+
+    return False
 
 
 def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
@@ -102,6 +130,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
         if ln.lower() == "zurück" and i + 1 < len(lines):
             title = lines[i + 1].strip()
             break
+
     if not title:
         if DEBUG:
             print(f"[DEBUG] No title found for {url} first lines: {lines[:15]}")
@@ -110,7 +139,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     start_dt: datetime | None = None
     end_dt: datetime | None = None
 
-    # 1) Format: 07.02.2026 08:30-07.02.2026 11:30
+    # 1) DD.MM.YYYY HH:MM-DD.MM.YYYY HH:MM
     m = re.search(
         r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})",
         full,
@@ -121,7 +150,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
         end_dt = datetime(int(m.group(8)), int(m.group(7)), int(m.group(6)),
                           int(m.group(9)), int(m.group(10)), tzinfo=TZ)
     else:
-        # 2) Format: 23.01.2026 19:00 - 21:00 Uhr (Ende ohne Datum)
+        # 2) DD.MM.YYYY HH:MM - HH:MM Uhr
         m = re.search(
             r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\s*Uhr",
             full,
@@ -133,7 +162,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
             end_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
                               int(m.group(6)), int(m.group(7)), tzinfo=TZ)
         else:
-            # 3) Format: 23.01.2026 19:00 Uhr (nur Start)
+            # 3) DD.MM.YYYY HH:MM Uhr
             m = re.search(
                 r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*Uhr",
                 full,
@@ -144,7 +173,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                                     int(m.group(4)), int(m.group(5)), tzinfo=TZ)
                 end_dt = None
             else:
-                # 4) Nur Datum: 23.01.2026
+                # 4) DD.MM.YYYY
                 m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", full)
                 if m:
                     start_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
@@ -157,7 +186,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
             print(f"[DEBUG] First lines: {lines[:25]}")
         return None
 
-    # Location Heuristik: Zeile nach erster Datumszeile
+    # Location robust: suche ab der ersten Datumzeile vorwärts nach einer Zeile, die wie Ort aussieht
     location = None
     date_line_idx = None
     for i, ln in enumerate(lines):
@@ -166,9 +195,16 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
             break
 
     if date_line_idx is not None:
-        for j in range(date_line_idx + 1, min(date_line_idx + 8, len(lines))):
+        for j in range(date_line_idx + 1, min(date_line_idx + 30, len(lines))):
             cand = lines[j]
-            if len(cand) > 2:
+            if looks_like_location(cand):
+                location = cand
+                break
+
+    # Fallback: irgendwo im Text eine plausible Adresse finden
+    if not location:
+        for cand in lines:
+            if looks_like_location(cand):
                 location = cand
                 break
 
@@ -198,9 +234,9 @@ def build_message(evt: dict) -> str:
     else:
         when = f"{sd.strftime('%d.%m.%Y %H:%M')} Uhr"
 
-    parts = [f"<b>{title}</b>", when]
+    parts = [f"<b>{title}</b>", f"🗓 {when}"]
     if loc:
-        parts.append(loc)
+        parts.append(f"📍 {loc}")
     parts.append(f'<a href="{evt["url"]}">Details</a>')
     return "\n".join(parts)
 
