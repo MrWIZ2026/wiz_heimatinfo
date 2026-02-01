@@ -96,19 +96,46 @@ def is_obviously_not_location(line: str) -> bool:
 
     low = s.lower()
 
-    # UI Wörter
     if low in {"details", "zurück"}:
         return True
 
-    # Zeit oder Datum
     if re.fullmatch(DATE_RE, s):
         return True
+
     if re.search(rf"{DATE_RE}\s+\d{{1,2}}:\d{{2}}", s):
         return True
+
     if re.search(r"\b\d{1,2}:\d{2}\b", s) and "uhr" in low:
         return True
 
     return False
+
+
+def find_event_datetime_line_index(lines: list[str], event_date_str: str, event_time_str: str) -> int | None:
+    """
+    Sucht die Zeile, die zum Event Startdatum und Startzeit gehört.
+    Falls Datum und Uhrzeit auf mehrere Zeilen verteilt sind, wird auch das abgefangen.
+    """
+    # 1. Zeile enthält Datum und Uhrzeit
+    for i, ln in enumerate(lines):
+        if event_date_str in ln and event_time_str in ln:
+            return i
+
+    # 2. Datum in Zeile i, Uhrzeit in Zeile i oder i+1
+    date_idxs = [i for i, ln in enumerate(lines) if event_date_str in ln]
+    if date_idxs:
+        for i in date_idxs:
+            if event_time_str in lines[i]:
+                return i
+            if i + 1 < len(lines) and event_time_str in lines[i + 1]:
+                return i
+            if i + 2 < len(lines) and event_time_str in lines[i + 2]:
+                return i
+
+        # Fallback: erste Zeile mit dem Event Datum
+        return date_idxs[0]
+
+    return None
 
 
 def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
@@ -117,7 +144,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     full = "\n".join(lines)
 
-    # Titel: meist direkt nach "Zurück"
+    # Titel meist direkt nach "Zurück"
     title = None
     for i, ln in enumerate(lines):
         if ln.lower() == "zurück" and i + 1 < len(lines):
@@ -132,10 +159,11 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     start_dt = None
     end_dt = None
 
-    # Wir merken uns die Zeile, die das Datumsformat enthält
-    date_line_idx = None
+    # Wir merken uns Startdatum und Startzeit als Strings, um die richtige Zeile zu finden
+    event_date_str = None
+    event_time_str = None
 
-    # 1) DD.MM.YYYY HH:MM-DD.MM.YYYY HH:MM
+    # Format A: 06.03.2026 19:00 - 06.03.2026 21:00
     m = re.search(
         r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})",
         full,
@@ -145,17 +173,10 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                             int(m.group(4)), int(m.group(5)), tzinfo=TZ)
         end_dt = datetime(int(m.group(8)), int(m.group(7)), int(m.group(6)),
                           int(m.group(9)), int(m.group(10)), tzinfo=TZ)
-
-        # Datumszeile Index finden (für Ort direkt darunter)
-        for i, ln in enumerate(lines):
-            if re.search(
-                r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}\s*[-–]\s*\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}",
-                ln
-            ):
-                date_line_idx = i
-                break
+        event_date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{int(m.group(3))}"
+        event_time_str = f"{int(m.group(4)):02d}:{int(m.group(5)):02d}"
     else:
-        # 2) DD.MM.YYYY HH:MM - HH:MM Uhr
+        # Format B: 23.01.2026 19:00 - 21:00 Uhr
         m = re.search(
             r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\s*Uhr",
             full,
@@ -166,13 +187,10 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                                 int(m.group(4)), int(m.group(5)), tzinfo=TZ)
             end_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
                               int(m.group(6)), int(m.group(7)), tzinfo=TZ)
-
-            for i, ln in enumerate(lines):
-                if re.search(rf"{DATE_RE}\s+\d{{1,2}}:\d{{2}}\s*[-–]\s*\d{{1,2}}:\d{{2}}\s*Uhr", ln, re.IGNORECASE):
-                    date_line_idx = i
-                    break
+            event_date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{int(m.group(3))}"
+            event_time_str = f"{int(m.group(4)):02d}:{int(m.group(5)):02d}"
         else:
-            # 3) DD.MM.YYYY HH:MM Uhr
+            # Format C: 23.01.2026 19:00 Uhr
             m = re.search(
                 r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*Uhr",
                 full,
@@ -182,47 +200,56 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                 start_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
                                     int(m.group(4)), int(m.group(5)), tzinfo=TZ)
                 end_dt = None
-
-                for i, ln in enumerate(lines):
-                    if re.search(rf"{DATE_RE}\s+\d{{1,2}}:\d{{2}}\s*Uhr", ln, re.IGNORECASE):
-                        date_line_idx = i
-                        break
+                event_date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{int(m.group(3))}"
+                event_time_str = f"{int(m.group(4)):02d}:{int(m.group(5)):02d}"
             else:
-                # 4) DD.MM.YYYY
+                # Format D: nur Datum
                 m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", full)
                 if m:
                     start_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
                                         0, 0, tzinfo=TZ)
                     end_dt = None
+                    event_date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{int(m.group(3))}"
+                    event_time_str = "00:00"
 
-                    for i, ln in enumerate(lines):
-                        if re.fullmatch(DATE_RE, ln.strip()):
-                            date_line_idx = i
-                            break
-
-    if not start_dt:
+    if not start_dt or not event_date_str or not event_time_str:
         if DEBUG:
             print(f"[DEBUG] No date/time for {url}")
             print(f"[DEBUG] First lines: {lines[:40]}")
         return None
 
-    # Ort exakt aus der Zeile direkt unter der Datum/Uhrzeit Zeile nehmen
+    # Ort exakt aus der Zeile direkt unter der Event Datum und Uhrzeit Zeile
     location = None
-    if date_line_idx is not None:
-        for j in range(date_line_idx + 1, min(date_line_idx + 6, len(lines))):
+    dt_idx = find_event_datetime_line_index(lines, event_date_str, event_time_str)
+
+    if dt_idx is not None:
+        for j in range(dt_idx + 1, min(dt_idx + 6, len(lines))):
             cand = lines[j].strip()
             if not is_obviously_not_location(cand):
                 location = cand
                 break
 
-    # Fallback: falls dort nichts sinnvolles steht, suchen wir die erste plausible Zeile nach der Datumszeile
+    # Fallback wenn Datum Zeile nicht gefunden wurde, suche nach der ersten Zeile mit dem Event Datum
     if not location:
-        if date_line_idx is not None:
-            for j in range(date_line_idx + 1, min(date_line_idx + 30, len(lines))):
-                cand = lines[j].strip()
-                if not is_obviously_not_location(cand) and len(cand) >= 4:
-                    location = cand
-                    break
+        for i, ln in enumerate(lines):
+            if event_date_str in ln:
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    cand = lines[j].strip()
+                    if not is_obviously_not_location(cand):
+                        location = cand
+                        break
+                break
+
+    if DEBUG and not location:
+        print(f"[DEBUG] Location not found for {url}")
+        print(f"[DEBUG] event_date_str={event_date_str} event_time_str={event_time_str}")
+        print(f"[DEBUG] Lines around datetime:")
+        if dt_idx is not None:
+            lo = max(0, dt_idx - 3)
+            hi = min(len(lines), dt_idx + 10)
+            print(lines[lo:hi])
+        else:
+            print(lines[:50])
 
     event_id = url.rstrip("/").split("/")[-1]
 
