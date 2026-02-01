@@ -89,9 +89,17 @@ def extract_event_detail_urls_from_embed(embed_html: str, embed_url: str) -> set
     return urls
 
 
+def is_separator_line(s: str) -> bool:
+    t = (s or "").strip()
+    return t in {"-", "–", "—", "•", "|", "¦"}
+
+
 def is_obviously_not_location(line: str) -> bool:
     s = (line or "").strip()
     if not s:
+        return True
+
+    if is_separator_line(s):
         return True
 
     low = s.lower()
@@ -112,16 +120,10 @@ def is_obviously_not_location(line: str) -> bool:
 
 
 def find_event_datetime_line_index(lines: list[str], event_date_str: str, event_time_str: str) -> int | None:
-    """
-    Sucht die Zeile, die zum Event Startdatum und Startzeit gehört.
-    Falls Datum und Uhrzeit auf mehrere Zeilen verteilt sind, wird auch das abgefangen.
-    """
-    # 1. Zeile enthält Datum und Uhrzeit
     for i, ln in enumerate(lines):
         if event_date_str in ln and event_time_str in ln:
             return i
 
-    # 2. Datum in Zeile i, Uhrzeit in Zeile i oder i+1
     date_idxs = [i for i, ln in enumerate(lines) if event_date_str in ln]
     if date_idxs:
         for i in date_idxs:
@@ -131,8 +133,6 @@ def find_event_datetime_line_index(lines: list[str], event_date_str: str, event_
                 return i
             if i + 2 < len(lines) and event_time_str in lines[i + 2]:
                 return i
-
-        # Fallback: erste Zeile mit dem Event Datum
         return date_idxs[0]
 
     return None
@@ -144,7 +144,6 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     full = "\n".join(lines)
 
-    # Titel meist direkt nach "Zurück"
     title = None
     for i, ln in enumerate(lines):
         if ln.lower() == "zurück" and i + 1 < len(lines):
@@ -158,12 +157,9 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
 
     start_dt = None
     end_dt = None
-
-    # Wir merken uns Startdatum und Startzeit als Strings, um die richtige Zeile zu finden
     event_date_str = None
     event_time_str = None
 
-    # Format A: 06.03.2026 19:00 - 06.03.2026 21:00
     m = re.search(
         r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})",
         full,
@@ -176,7 +172,6 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
         event_date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{int(m.group(3))}"
         event_time_str = f"{int(m.group(4)):02d}:{int(m.group(5)):02d}"
     else:
-        # Format B: 23.01.2026 19:00 - 21:00 Uhr
         m = re.search(
             r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\s*Uhr",
             full,
@@ -190,7 +185,6 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
             event_date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{int(m.group(3))}"
             event_time_str = f"{int(m.group(4)):02d}:{int(m.group(5)):02d}"
         else:
-            # Format C: 23.01.2026 19:00 Uhr
             m = re.search(
                 r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*Uhr",
                 full,
@@ -203,7 +197,6 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                 event_date_str = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{int(m.group(3))}"
                 event_time_str = f"{int(m.group(4)):02d}:{int(m.group(5)):02d}"
             else:
-                # Format D: nur Datum
                 m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", full)
                 if m:
                     start_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
@@ -218,38 +211,38 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
             print(f"[DEBUG] First lines: {lines[:40]}")
         return None
 
-    # Ort exakt aus der Zeile direkt unter der Event Datum und Uhrzeit Zeile
     location = None
     dt_idx = find_event_datetime_line_index(lines, event_date_str, event_time_str)
 
     if dt_idx is not None:
-        for j in range(dt_idx + 1, min(dt_idx + 6, len(lines))):
+        for j in range(dt_idx + 1, min(dt_idx + 12, len(lines))):
             cand = lines[j].strip()
             if not is_obviously_not_location(cand):
                 location = cand
                 break
 
-    # Fallback wenn Datum Zeile nicht gefunden wurde, suche nach der ersten Zeile mit dem Event Datum
     if not location:
         for i, ln in enumerate(lines):
             if event_date_str in ln:
-                for j in range(i + 1, min(i + 6, len(lines))):
+                for j in range(i + 1, min(i + 12, len(lines))):
                     cand = lines[j].strip()
                     if not is_obviously_not_location(cand):
                         location = cand
                         break
                 break
 
+    if location and is_separator_line(location):
+        location = None
+
     if DEBUG and not location:
         print(f"[DEBUG] Location not found for {url}")
         print(f"[DEBUG] event_date_str={event_date_str} event_time_str={event_time_str}")
-        print(f"[DEBUG] Lines around datetime:")
         if dt_idx is not None:
             lo = max(0, dt_idx - 3)
-            hi = min(len(lines), dt_idx + 10)
-            print(lines[lo:hi])
+            hi = min(len(lines), dt_idx + 15)
+            print(f"[DEBUG] Lines around datetime: {lines[lo:hi]}")
         else:
-            print(lines[:50])
+            print(f"[DEBUG] First lines: {lines[:60]}")
 
     event_id = url.rstrip("/").split("/")[-1]
 
@@ -286,53 +279,4 @@ def build_message(evt: dict) -> str:
 
 
 def main():
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise SystemExit("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
-
-    today = datetime.now(TZ).date()
-
-    state = load_state()
-    posted = set(state.get("posted_event_ids", []))
-
-    embed_html = fetch(HEIMAT_EMBED_URL)
-    detail_urls = sorted(extract_event_detail_urls_from_embed(embed_html, HEIMAT_EMBED_URL))
-
-    print(f"Embed URL: {HEIMAT_EMBED_URL}")
-    print(f"Discovered detail urls: {len(detail_urls)}")
-
-    events = []
-    for u in detail_urls:
-        try:
-            html = fetch(u)
-            evt = parse_heimat_event_detail_page(html, u)
-            if evt:
-                events.append(evt)
-            else:
-                if DEBUG:
-                    print(f"[DEBUG] Parsed None for {u}")
-        except Exception as e:
-            print(f"Failed {u}: {e}")
-        time.sleep(0.5)
-
-    events.sort(key=lambda e: e["start_dt"])
-
-    if INCLUDE_PAST:
-        to_post = [e for e in events if e["id"] not in posted]
-    else:
-        to_post = [e for e in events if e["id"] not in posted and e["start_dt"].date() >= today]
-
-    print(f"Parsed events: {len(events)}")
-    print(f"To post: {len(to_post)} INCLUDE_PAST={INCLUDE_PAST}")
-
-    for evt in to_post:
-        telegram_send_message(build_message(evt))
-        posted.add(evt["id"])
-        state["posted_event_ids"] = sorted(posted)
-        save_state(state)
-        time.sleep(1.0)
-
-    print("Done.")
-
-
-if __name__ == "__main__":
-    main()
+    if not TELE
