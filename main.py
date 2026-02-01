@@ -2,16 +2,14 @@ import os
 import re
 import json
 import time
-from datetime import datetime, date
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from datetime import datetime
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
-from dateutil.relativedelta import relativedelta
 
 
-BASE_LIST_URL = "https://www.witzenhausen.eu/veranstaltungen/"
 STATE_FILE = "state.json"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -20,24 +18,14 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 TZ = ZoneInfo(os.environ.get("TZ", "Europe/Berlin"))
 INCLUDE_PAST = os.environ.get("EXIST_POSTS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
+HEIMAT_EMBED_URL = os.environ.get("HEIMAT_EMBED_URL", "").strip()
+if not HEIMAT_EMBED_URL:
+    # Fallback, funktioniert für Witzenhausen (c Parameter)
+    HEIMAT_EMBED_URL = "https://www.heimat-info.de/embeddings/events/v1/?c=a8169a1a-b21f-4922-98de-1bce6480c8f6"
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; WitzenhausenEventsBot/1.0; +https://github.com/)",
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-}
-
-MONTH_MAP = {
-    "jan": 1, "januar": 1,
-    "feb": 2, "februar": 2,
-    "mär": 3, "mrz": 3, "märz": 3,
-    "apr": 4, "april": 4,
-    "mai": 5,
-    "jun": 6, "juni": 6,
-    "jul": 7, "juli": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "okt": 10, "oktober": 10,
-    "nov": 11, "november": 11,
-    "dez": 12, "dezember": 12,
 }
 
 
@@ -59,146 +47,6 @@ def fetch(url: str) -> str:
     return r.text
 
 
-def canonical_event_url(href: str) -> str | None:
-    abs_url = urljoin(BASE_LIST_URL, href.strip())
-    parts = urlsplit(abs_url)
-
-    if "witzenhausen.eu" not in parts.netloc:
-        return None
-
-    path = parts.path
-
-    if path in ("/veranstaltungen", "/veranstaltungen/"):
-        return None
-
-    if not path.startswith("/veranstaltungen/"):
-        return None
-
-    clean = urlunsplit((parts.scheme, parts.netloc, path.rstrip("/") + "/", "", ""))
-    return clean
-
-
-def extract_event_urls_from_list_page(html: str) -> set[str]:
-    soup = BeautifulSoup(html, "html.parser")
-    urls: set[str] = set()
-
-    for a in soup.find_all("a", href=True):
-        u = canonical_event_url(a["href"])
-        if u:
-            urls.add(u)
-
-    return urls
-
-
-def parse_date_from_text(text: str) -> date | None:
-    t = text.replace("..", ".").replace("\xa0", " ").strip()
-
-    m = re.search(r"\b(\d{1,2})\.\s*([A-Za-zÄÖÜäöü]{3,10})\.?\s*(\d{4})\b", t)
-    if m:
-        day = int(m.group(1))
-        mon_raw = m.group(2).strip().lower()
-        mon = MONTH_MAP.get(mon_raw)
-        if not mon:
-            return None
-        year = int(m.group(3))
-        return date(year, mon, day)
-
-    m = re.search(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b", t)
-    if m:
-        return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-
-    return None
-
-
-def parse_time_from_text(text: str) -> tuple[int, int] | None:
-    t = text.replace("\xa0", " ").strip()
-    m = re.search(r"\b(\d{1,2})[:.](\d{2})\s*Uhr\b", t)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-
-    m = re.search(r"\b(\d{1,2})[:.](\d{2})\b", t)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-
-    return None
-
-
-def parse_event_page(html: str, url: str) -> dict | None:
-    soup = BeautifulSoup(html, "html.parser")
-
-    title_tag = soup.find("h1") or soup.find("h2")
-    title = title_tag.get_text(strip=True) if title_tag else None
-    if not title:
-        return None
-
-    text = soup.get_text("\n", strip=True).replace("\xa0", " ")
-    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-
-    event_date: date | None = None
-    for ln in lines[:200]:
-        d = parse_date_from_text(ln)
-        if d:
-            event_date = d
-            break
-    if not event_date:
-        return None
-
-    event_time: tuple[int, int] | None = None
-    for ln in lines[:300]:
-        tm = parse_time_from_text(ln)
-        if tm:
-            event_time = tm
-            break
-
-    location = None
-    for ln in lines[:400]:
-        if re.search(r"\b\d{5}\b", ln) and ("Witzenhausen" in ln or "," in ln):
-            location = ln
-            break
-    if not location:
-        for ln in lines[:400]:
-            if "Witzenhausen" in ln and len(ln) > 8:
-                location = ln
-                break
-
-    slug = url.rstrip("/").split("/")[-1]
-
-    if event_time:
-        hour, minute = event_time
-    else:
-        hour, minute = 0, 0
-
-    start_dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=TZ)
-
-    return {
-        "id": slug,
-        "title": title,
-        "location": location,
-        "url": url,
-        "start_dt": start_dt,
-        "date": event_date,
-        "time": f"{hour:02d}:{minute:02d}" if event_time else None,
-    }
-
-
-def escape_html(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def build_message(evt: dict) -> str:
-    title = escape_html(evt["title"])
-    sd: datetime = evt["start_dt"]
-    loc = escape_html(evt["location"]) if evt.get("location") else None
-
-    when = sd.strftime("%d.%m.%Y %H:%M Uhr")
-
-    parts = [f"<b>{title}</b>", when]
-    if loc:
-        parts.append(loc)
-    parts.append(f'<a href="{evt["url"]}">Details</a>')
-    return "\n".join(parts)
-
-
 def telegram_send_message(text_html: str) -> None:
     api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -211,26 +59,107 @@ def telegram_send_message(text_html: str) -> None:
     r.raise_for_status()
 
 
-def discover_event_urls(months_ahead: int = 12) -> set[str]:
+def escape_html(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def extract_event_detail_urls_from_embed(embed_html: str, embed_url: str) -> set[str]:
+    soup = BeautifulSoup(embed_html, "html.parser")
     urls: set[str] = set()
-    today = date.today()
 
-    for m in range(months_ahead):
-        month_date = (today + relativedelta(months=m)).replace(day=1)
-        month_param = month_date.isoformat()
-        list_url = f"{BASE_LIST_URL}?eventDisplay=list&tribe-bar-date={month_param}"
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not href:
+            continue
 
-        try:
-            html = fetch(list_url)
-            month_urls = extract_event_urls_from_list_page(html)
-            urls |= month_urls
-            print(f"List {month_param} found {len(month_urls)} urls")
-        except Exception as e:
-            print(f"List {month_param} failed: {e}")
+        abs_url = urljoin(embed_url, href)
 
-        time.sleep(1)
+        # Gesucht: Heimat Info Event Detail URLs
+        if abs_url.startswith("https://www.heimat-info.de/veranstaltungen/"):
+            # Es gibt Links mit gleichem Ziel, wir normalisieren leicht
+            urls.add(abs_url.rstrip("/"))
 
     return urls
+
+
+def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text("\n", strip=True).replace("\xa0", " ")
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+
+    # Titel: meistens direkt nach "Zurück"
+    title = None
+    for i, ln in enumerate(lines):
+        if ln.lower() == "zurück" and i + 1 < len(lines):
+            title = lines[i + 1].strip()
+            break
+    if not title:
+        return None
+
+    # Zeitfenster: 07.02.2026 08:30-07.02.2026 11:30
+    start_dt = None
+    end_dt = None
+
+    for ln in lines:
+        m = re.search(
+            r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})\s*-\s*(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})",
+            ln,
+        )
+        if m:
+            start_dt = datetime(
+                int(m.group(3)), int(m.group(2)), int(m.group(1)),
+                int(m.group(4)), int(m.group(5)),
+                tzinfo=TZ
+            )
+            end_dt = datetime(
+                int(m.group(8)), int(m.group(7)), int(m.group(6)),
+                int(m.group(9)), int(m.group(10)),
+                tzinfo=TZ
+            )
+            break
+
+    if not start_dt:
+        return None
+
+    # Location: meistens direkt nach der Zeile mit dem Zeitraum
+    location = None
+    try:
+        idx = next(i for i, ln in enumerate(lines) if re.search(r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}-\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}", ln))
+        if idx + 1 < len(lines):
+            cand = lines[idx + 1].strip()
+            if cand:
+                location = cand
+    except StopIteration:
+        pass
+
+    event_id = url.rstrip("/").split("/")[-1]
+
+    return {
+        "id": event_id,
+        "title": title,
+        "location": location,
+        "url": url,
+        "start_dt": start_dt,
+        "end_dt": end_dt,
+    }
+
+
+def build_message(evt: dict) -> str:
+    title = escape_html(evt["title"])
+    loc = escape_html(evt["location"]) if evt.get("location") else None
+
+    sd: datetime = evt["start_dt"]
+    ed: datetime = evt["end_dt"]
+
+    when = f"{sd.strftime('%d.%m.%Y %H:%M')} bis {ed.strftime('%H:%M')} Uhr"
+    if sd.date() != ed.date():
+        when = f"{sd.strftime('%d.%m.%Y %H:%M')} bis {ed.strftime('%d.%m.%Y %H:%M')} Uhr"
+
+    parts = [f"<b>{title}</b>", when]
+    if loc:
+        parts.append(loc)
+    parts.append(f'<a href="{evt["url"]}">Details</a>')
+    return "\n".join(parts)
 
 
 def main():
@@ -243,18 +172,21 @@ def main():
     state = load_state()
     posted = set(state.get("posted_event_ids", []))
 
-    event_urls = sorted(discover_event_urls(months_ahead=12))
-    print(f"Discovered total event urls: {len(event_urls)}")
+    embed_html = fetch(HEIMAT_EMBED_URL)
+    detail_urls = sorted(extract_event_detail_urls_from_embed(embed_html, HEIMAT_EMBED_URL))
 
-    events: list[dict] = []
-    for u in event_urls:
+    print(f"Embed URL: {HEIMAT_EMBED_URL}")
+    print(f"Discovered detail urls: {len(detail_urls)}")
+
+    events = []
+    for u in detail_urls:
         try:
             html = fetch(u)
-            evt = parse_event_page(html, u)
+            evt = parse_heimat_event_detail_page(html, u)
             if evt:
                 events.append(evt)
         except Exception as e:
-            print(f"Parse failed {u}: {e}")
+            print(f"Failed {u}: {e}")
         time.sleep(0.5)
 
     events.sort(key=lambda e: e["start_dt"])
@@ -272,7 +204,7 @@ def main():
         posted.add(evt["id"])
         state["posted_event_ids"] = sorted(posted)
         save_state(state)
-        time.sleep(1)
+        time.sleep(1.0)
 
     print("Done.")
 
