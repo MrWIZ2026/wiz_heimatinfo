@@ -28,7 +28,6 @@ HEADERS = {
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
 }
 
-
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 DATE_RE = r"\d{2}\.\d{2}\.\d{4}"
 
@@ -90,66 +89,26 @@ def extract_event_detail_urls_from_embed(embed_html: str, embed_url: str) -> set
     return urls
 
 
-def looks_like_location(line: str) -> bool:
+def is_obviously_not_location(line: str) -> bool:
     s = (line or "").strip()
-    if len(s) < 4:
-        return False
+    if not s:
+        return True
 
     low = s.lower()
 
+    # UI Wörter
     if low in {"details", "zurück"}:
-        return False
+        return True
 
-    if s.startswith(","):
-        return False
-
+    # Zeit oder Datum
     if re.fullmatch(DATE_RE, s):
-        return False
-
+        return True
     if re.search(rf"{DATE_RE}\s+\d{{1,2}}:\d{{2}}", s):
-        return False
-
+        return True
     if re.search(r"\b\d{1,2}:\d{2}\b", s) and "uhr" in low:
-        return False
-
-    if re.search(r"\b\d{5}\b", s):
-        left = re.split(r"\b\d{5}\b", s, maxsplit=1)[0].strip()
-        if not re.search(r"[A-Za-zÄÖÜäöü]", left):
-            return False
-
-    if re.search(r"\b\d{5}\b", s):
-        return True
-
-    if any(k in low for k in ["straße", "str.", "platz", "weg", "gasse", "markt", "allee", "ring", "hof", "damm"]):
-        return True
-
-    if "," in s and re.search(r"[A-Za-zÄÖÜäöü]", s):
         return True
 
     return False
-
-
-def location_score(line: str) -> int:
-    s = (line or "").strip()
-    low = s.lower()
-    score = 0
-
-    if s.startswith(","):
-        score -= 100
-
-    if re.match(r"^[A-Za-zÄÖÜäöü]", s):
-        score += 10
-
-    if re.search(r"\b\d{5}\b", s):
-        score += 5
-
-    if any(k in low for k in ["straße", "str.", "platz", "weg", "gasse", "allee", "markt"]):
-        score += 5
-
-    if low.strip() == "witzenhausen":
-        score -= 5
-
-    return score
 
 
 def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
@@ -158,6 +117,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     full = "\n".join(lines)
 
+    # Titel: meist direkt nach "Zurück"
     title = None
     for i, ln in enumerate(lines):
         if ln.lower() == "zurück" and i + 1 < len(lines):
@@ -172,6 +132,10 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     start_dt = None
     end_dt = None
 
+    # Wir merken uns die Zeile, die das Datumsformat enthält
+    date_line_idx = None
+
+    # 1) DD.MM.YYYY HH:MM-DD.MM.YYYY HH:MM
     m = re.search(
         r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})",
         full,
@@ -181,7 +145,17 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                             int(m.group(4)), int(m.group(5)), tzinfo=TZ)
         end_dt = datetime(int(m.group(8)), int(m.group(7)), int(m.group(6)),
                           int(m.group(9)), int(m.group(10)), tzinfo=TZ)
+
+        # Datumszeile Index finden (für Ort direkt darunter)
+        for i, ln in enumerate(lines):
+            if re.search(
+                r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}\s*[-–]\s*\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}",
+                ln
+            ):
+                date_line_idx = i
+                break
     else:
+        # 2) DD.MM.YYYY HH:MM - HH:MM Uhr
         m = re.search(
             r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\s*Uhr",
             full,
@@ -192,7 +166,13 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                                 int(m.group(4)), int(m.group(5)), tzinfo=TZ)
             end_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
                               int(m.group(6)), int(m.group(7)), tzinfo=TZ)
+
+            for i, ln in enumerate(lines):
+                if re.search(rf"{DATE_RE}\s+\d{{1,2}}:\d{{2}}\s*[-–]\s*\d{{1,2}}:\d{{2}}\s*Uhr", ln, re.IGNORECASE):
+                    date_line_idx = i
+                    break
         else:
+            # 3) DD.MM.YYYY HH:MM Uhr
             m = re.search(
                 r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*Uhr",
                 full,
@@ -202,43 +182,50 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
                 start_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
                                     int(m.group(4)), int(m.group(5)), tzinfo=TZ)
                 end_dt = None
+
+                for i, ln in enumerate(lines):
+                    if re.search(rf"{DATE_RE}\s+\d{{1,2}}:\d{{2}}\s*Uhr", ln, re.IGNORECASE):
+                        date_line_idx = i
+                        break
             else:
+                # 4) DD.MM.YYYY
                 m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", full)
                 if m:
                     start_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)),
                                         0, 0, tzinfo=TZ)
                     end_dt = None
 
+                    for i, ln in enumerate(lines):
+                        if re.fullmatch(DATE_RE, ln.strip()):
+                            date_line_idx = i
+                            break
+
     if not start_dt:
         if DEBUG:
             print(f"[DEBUG] No date/time for {url}")
-            print(f"[DEBUG] First lines: {lines[:30]}")
+            print(f"[DEBUG] First lines: {lines[:40]}")
         return None
 
-    candidates = []
-    date_line_idx = None
-    for i, ln in enumerate(lines):
-        if re.search(DATE_RE, ln):
-            date_line_idx = i
-            break
-
-    if date_line_idx is not None:
-        for j in range(date_line_idx + 1, min(date_line_idx + 40, len(lines))):
-            cand = lines[j]
-            if looks_like_location(cand):
-                candidates.append(cand)
-
-    if not candidates:
-        for cand in lines:
-            if looks_like_location(cand):
-                candidates.append(cand)
-
+    # Ort exakt aus der Zeile direkt unter der Datum/Uhrzeit Zeile nehmen
     location = None
-    if candidates:
-        candidates.sort(key=location_score, reverse=True)
-        location = candidates[0]
+    if date_line_idx is not None:
+        for j in range(date_line_idx + 1, min(date_line_idx + 6, len(lines))):
+            cand = lines[j].strip()
+            if not is_obviously_not_location(cand):
+                location = cand
+                break
+
+    # Fallback: falls dort nichts sinnvolles steht, suchen wir die erste plausible Zeile nach der Datumszeile
+    if not location:
+        if date_line_idx is not None:
+            for j in range(date_line_idx + 1, min(date_line_idx + 30, len(lines))):
+                cand = lines[j].strip()
+                if not is_obviously_not_location(cand) and len(cand) >= 4:
+                    location = cand
+                    break
 
     event_id = url.rstrip("/").split("/")[-1]
+
     return {
         "id": event_id,
         "title": title,
