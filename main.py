@@ -152,7 +152,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
 
     if not title:
         if DEBUG:
-            print(f"[DEBUG] No title for {url} first lines: {lines[:20]}")
+            print(f"[DEBUG] No title for {url} first lines: {lines[:25]}")
         return None
 
     start_dt = None
@@ -208,14 +208,14 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     if not start_dt or not event_date_str or not event_time_str:
         if DEBUG:
             print(f"[DEBUG] No date/time for {url}")
-            print(f"[DEBUG] First lines: {lines[:40]}")
+            print(f"[DEBUG] First lines: {lines[:50]}")
         return None
 
     location = None
     dt_idx = find_event_datetime_line_index(lines, event_date_str, event_time_str)
 
     if dt_idx is not None:
-        for j in range(dt_idx + 1, min(dt_idx + 12, len(lines))):
+        for j in range(dt_idx + 1, min(dt_idx + 15, len(lines))):
             cand = lines[j].strip()
             if not is_obviously_not_location(cand):
                 location = cand
@@ -224,7 +224,7 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
     if not location:
         for i, ln in enumerate(lines):
             if event_date_str in ln:
-                for j in range(i + 1, min(i + 12, len(lines))):
+                for j in range(i + 1, min(i + 15, len(lines))):
                     cand = lines[j].strip()
                     if not is_obviously_not_location(cand):
                         location = cand
@@ -239,10 +239,10 @@ def parse_heimat_event_detail_page(html: str, url: str) -> dict | None:
         print(f"[DEBUG] event_date_str={event_date_str} event_time_str={event_time_str}")
         if dt_idx is not None:
             lo = max(0, dt_idx - 3)
-            hi = min(len(lines), dt_idx + 15)
+            hi = min(len(lines), dt_idx + 18)
             print(f"[DEBUG] Lines around datetime: {lines[lo:hi]}")
         else:
-            print(f"[DEBUG] First lines: {lines[:60]}")
+            print(f"[DEBUG] First lines: {lines[:70]}")
 
     event_id = url.rstrip("/").split("/")[-1]
 
@@ -279,4 +279,53 @@ def build_message(evt: dict) -> str:
 
 
 def main():
-    if not TELE
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        raise SystemExit("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+
+    today = datetime.now(TZ).date()
+
+    state = load_state()
+    posted = set(state.get("posted_event_ids", []))
+
+    embed_html = fetch(HEIMAT_EMBED_URL)
+    detail_urls = sorted(extract_event_detail_urls_from_embed(embed_html, HEIMAT_EMBED_URL))
+
+    print(f"Embed URL: {HEIMAT_EMBED_URL}")
+    print(f"Discovered detail urls: {len(detail_urls)}")
+
+    events = []
+    for u in detail_urls:
+        try:
+            html = fetch(u)
+            evt = parse_heimat_event_detail_page(html, u)
+            if evt:
+                events.append(evt)
+            else:
+                if DEBUG:
+                    print(f"[DEBUG] Parsed None for {u}")
+        except Exception as e:
+            print(f"Failed {u}: {e}")
+        time.sleep(0.5)
+
+    events.sort(key=lambda e: e["start_dt"])
+
+    if INCLUDE_PAST:
+        to_post = [e for e in events if e["id"] not in posted]
+    else:
+        to_post = [e for e in events if e["id"] not in posted and e["start_dt"].date() >= today]
+
+    print(f"Parsed events: {len(events)}")
+    print(f"To post: {len(to_post)} INCLUDE_PAST={INCLUDE_PAST}")
+
+    for evt in to_post:
+        telegram_send_message(build_message(evt))
+        posted.add(evt["id"])
+        state["posted_event_ids"] = sorted(posted)
+        save_state(state)
+        time.sleep(1.0)
+
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
