@@ -274,7 +274,7 @@ def build_message(evt: dict) -> str:
     parts = [f"<b>{title}</b>", when]
     if loc:
         parts.append(loc)
-    parts.append(f'<a href="{evt["url"]}">Details</a>')
+    parts.append(f'<a href="{evt["url"]}">Infos</a>')
     return "\n".join(parts)
 
 
