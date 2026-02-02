@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0 5 * * *"
 
+concurrency:
+  group: wiz-heimatinfo-state
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -14,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,9 +33,9 @@ jobs:
 
       - name: Run bot
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EXIST_POSTS: "0"
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          POST_EXISTING: "0"
         run: |
           python main.py
 
@@ -38,9 +44,12 @@ jobs:
           if git status --porcelain | grep -q "state.json"; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
+
             git add state.json
             git commit -m "Update state"
-            git push
+
+            git pull --rebase origin main
+            git push origin HEAD:main
           else
             echo "No changes"
           fi
