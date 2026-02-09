@@ -36,7 +36,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          POST_EXISTING: "1"
+          POST_EXISTING: "0"
           TZ: "Europe/Berlin"
         run: |
           python main.py
