@@ -46,8 +46,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Erst den aktuellen Remote-Stand holen, bevor wir lokale Änderungen committen
           git pull --rebase origin main
 
+          # Dann erst prüfen und committen
           if git status --porcelain | grep -q "state.json"; then
             git add state.json
             git commit -m "Update state"
