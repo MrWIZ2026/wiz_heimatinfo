@@ -36,7 +36,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          POST_EXISTING: "0"
+          POST_EXISTING: "1"
           TZ: "Europe/Berlin"
         run: |
           python main.py
@@ -46,14 +46,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Erst den aktuellen Remote-Stand holen, bevor wir lokale Änderungen committen
+          # Nur state.json anfassen
+          if git diff --quiet -- state.json; then
+            echo "No changes"
+            exit 0
+          fi
+
+          git add state.json
+          git commit -m "Update state"
+
+          # Jetzt ist der Tree sauber, Rebase ist erlaubt
           git pull --rebase origin main
 
-          # Dann erst prüfen und committen
-          if git status --porcelain | grep -q "state.json"; then
-            git add state.json
-            git commit -m "Update state"
-            git push origin HEAD:main
-          else
-            echo "No changes"
-          fi
+          git push origin HEAD:main
